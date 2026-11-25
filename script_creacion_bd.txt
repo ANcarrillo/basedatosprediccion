@@ -1,0 +1,379 @@
+﻿-- =====================================================================
+--  SCRIPT DE CREACIÓN DE LA BASE DE DATOS
+--  Sistema de alerta temprana de deserción estudiantil
+--  Autores: Francy Almario · Andrés Carrillo
+--  Motor: PostgreSQL 14 o superior (probado en 16 y 18)
+-- =====================================================================
+--
+--  CÓMO EJECUTARLO
+--
+--  Opción A - Terminal (psql), con este archivo completo:
+--      psql -U postgres -f script_creacion_bd.txt
+--
+--  Opción B - pgAdmin / DBeaver / HeidiSQL:
+--      1. Ejecute solo la PARTE 1 (CREATE DATABASE) conectado a "postgres".
+--      2. Conéctese a la base "desercion_db".
+--      3. Ejecute la PARTE 2 completa (desde BEGIN hasta COMMIT).
+--         (La línea "\connect" es solo para psql; en esas herramientas omítala.)
+--
+--  CONTENIDO
+--      Parte 1  Creación de la base de datos
+--      Parte 2  Estructura: 16 tablas, índices, vista vw_dataset_desercion
+--               (la que usa el modelo de ML) y los 4 roles base
+--      Parte 3  Primer usuario administrador (se crea desde el backend)
+-- =====================================================================
+
+
+-- =====================================================================
+--  PARTE 1. CREACIÓN DE LA BASE DE DATOS
+-- =====================================================================
+CREATE DATABASE desercion_db
+    WITH ENCODING = 'UTF8'
+         TEMPLATE = template0;
+
+\connect desercion_db
+
+
+-- =====================================================================
+--  PARTE 2. ESTRUCTURA (tablas, índices, vista y roles base)
+-- =====================================================================
+-- =====================================================================
+--  SISTEMA DE ALERTA TEMPRANA DE DESERCIÓN ESTUDIANTIL
+--  Capa 4 - Acceso a datos  |  PostgreSQL 14+
+--  Solo estructura (sin datos). Únicamente se insertan los roles base.
+--
+--  Uso:
+--    psql -U postgres -c "CREATE DATABASE desercion_db;"
+--    psql -U postgres -d desercion_db -f schema.sql
+-- =====================================================================
+
+BEGIN;
+
+-- ---------------------------------------------------------------------
+-- 1. SEGURIDAD: roles y usuarios
+-- ---------------------------------------------------------------------
+CREATE TABLE roles (
+    id              SERIAL PRIMARY KEY,
+    nombre          VARCHAR(30)  NOT NULL UNIQUE,      -- administrador, coordinador, docente, bienestar
+    descripcion     VARCHAR(200)
+);
+
+CREATE TABLE usuarios (
+    id              SERIAL PRIMARY KEY,
+    nombres         VARCHAR(100) NOT NULL,
+    apellidos       VARCHAR(100) NOT NULL,
+    email           VARCHAR(150) NOT NULL UNIQUE,
+    password_hash   VARCHAR(255) NOT NULL,
+    rol_id          INTEGER      NOT NULL REFERENCES roles(id),
+    activo          BOOLEAN      NOT NULL DEFAULT TRUE,
+    ultimo_acceso   TIMESTAMP,
+    creado_en       TIMESTAMP    NOT NULL DEFAULT NOW(),
+    actualizado_en  TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+-- ---------------------------------------------------------------------
+-- 2. ESTRUCTURA ACADÉMICA: facultades, programas, periodos
+-- ---------------------------------------------------------------------
+CREATE TABLE facultades (
+    id              SERIAL PRIMARY KEY,
+    nombre          VARCHAR(150) NOT NULL UNIQUE
+);
+
+CREATE TABLE programas (
+    id                  SERIAL PRIMARY KEY,
+    facultad_id         INTEGER      NOT NULL REFERENCES facultades(id),
+    codigo              VARCHAR(20)  NOT NULL UNIQUE,
+    nombre              VARCHAR(150) NOT NULL,
+    nivel               VARCHAR(30)  NOT NULL DEFAULT 'pregrado'
+                        CHECK (nivel IN ('tecnico','tecnologico','pregrado','especializacion','maestria')),
+    duracion_semestres  SMALLINT     NOT NULL DEFAULT 10 CHECK (duracion_semestres > 0)
+);
+
+-- Usuarios (coordinadores / docentes) asignados a programas: limita lo que ven
+CREATE TABLE usuario_programa (
+    usuario_id      INTEGER NOT NULL REFERENCES usuarios(id)  ON DELETE CASCADE,
+    programa_id     INTEGER NOT NULL REFERENCES programas(id) ON DELETE CASCADE,
+    PRIMARY KEY (usuario_id, programa_id)
+);
+
+CREATE TABLE periodos_academicos (
+    id              SERIAL PRIMARY KEY,
+    codigo          VARCHAR(10) NOT NULL UNIQUE,      -- ej. 2026-1
+    fecha_inicio    DATE        NOT NULL,
+    fecha_fin       DATE        NOT NULL,
+    actual          BOOLEAN     NOT NULL DEFAULT FALSE,
+    CHECK (fecha_fin > fecha_inicio)
+);
+
+-- ---------------------------------------------------------------------
+-- 3. ESTUDIANTES
+-- ---------------------------------------------------------------------
+CREATE TABLE estudiantes (
+    id                  SERIAL PRIMARY KEY,
+    codigo              VARCHAR(20)  NOT NULL UNIQUE,
+    tipo_documento      VARCHAR(5)   NOT NULL DEFAULT 'CC' CHECK (tipo_documento IN ('CC','TI','CE','PA','PPT')),
+    numero_documento    VARCHAR(20)  NOT NULL UNIQUE,
+    nombres             VARCHAR(100) NOT NULL,
+    apellidos           VARCHAR(100) NOT NULL,
+    fecha_nacimiento    DATE,
+    genero              VARCHAR(15)  CHECK (genero IN ('masculino','femenino','otro')),
+    email               VARCHAR(150),
+    telefono            VARCHAR(20),
+    programa_id         INTEGER      NOT NULL REFERENCES programas(id),
+    periodo_ingreso_id  INTEGER      REFERENCES periodos_academicos(id),
+    semestre_actual     SMALLINT     NOT NULL DEFAULT 1 CHECK (semestre_actual BETWEEN 1 AND 14),
+    puntaje_saber11     SMALLINT     CHECK (puntaje_saber11 BETWEEN 0 AND 500),
+    tipo_colegio        VARCHAR(10)  CHECK (tipo_colegio IN ('publico','privado')),
+    estado              VARCHAR(15)  NOT NULL DEFAULT 'activo'
+                        CHECK (estado IN ('activo','desertor','graduado','retirado','inactivo')),
+    creado_en           TIMESTAMP    NOT NULL DEFAULT NOW(),
+    actualizado_en      TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+-- Datos socioeconómicos: uno por estudiante y periodo (pueden cambiar en el tiempo)
+CREATE TABLE datos_socioeconomicos (
+    id                      SERIAL PRIMARY KEY,
+    estudiante_id           INTEGER      NOT NULL REFERENCES estudiantes(id) ON DELETE CASCADE,
+    periodo_id              INTEGER      NOT NULL REFERENCES periodos_academicos(id),
+    estrato                 SMALLINT     CHECK (estrato BETWEEN 0 AND 6),
+    ingreso_familiar        NUMERIC(12,2) CHECK (ingreso_familiar >= 0),     -- en pesos (COP) mensuales
+    trabaja                 BOOLEAN      NOT NULL DEFAULT FALSE,
+    horas_trabajo_semana    SMALLINT     NOT NULL DEFAULT 0 CHECK (horas_trabajo_semana BETWEEN 0 AND 80),
+    personas_a_cargo        SMALLINT     NOT NULL DEFAULT 0 CHECK (personas_a_cargo >= 0),
+    tipo_vivienda           VARCHAR(15)  CHECK (tipo_vivienda IN ('propia','arriendo','familiar','residencia','otra')),
+    zona_residencia         VARCHAR(10)  CHECK (zona_residencia IN ('urbana','rural')),
+    distancia_km            NUMERIC(6,2) CHECK (distancia_km >= 0),
+    tiene_beca              BOOLEAN      NOT NULL DEFAULT FALSE,
+    apoyo_financiero        BOOLEAN      NOT NULL DEFAULT FALSE,          -- crédito ICETEX, subsidios, etc.
+    nivel_educativo_padres  VARCHAR(20)  CHECK (nivel_educativo_padres IN ('ninguno','primaria','secundaria','tecnico','universitario','posgrado')),
+    victima_conflicto       BOOLEAN      NOT NULL DEFAULT FALSE,
+    pertenece_etnia         BOOLEAN      NOT NULL DEFAULT FALSE,
+    discapacidad            BOOLEAN      NOT NULL DEFAULT FALSE,
+    creado_en               TIMESTAMP    NOT NULL DEFAULT NOW(),
+    UNIQUE (estudiante_id, periodo_id)
+);
+
+-- ---------------------------------------------------------------------
+-- 4. DATOS ACADÉMICOS
+-- ---------------------------------------------------------------------
+CREATE TABLE asignaturas (
+    id              SERIAL PRIMARY KEY,
+    programa_id     INTEGER      NOT NULL REFERENCES programas(id),
+    codigo          VARCHAR(20)  NOT NULL UNIQUE,
+    nombre          VARCHAR(150) NOT NULL,
+    creditos        SMALLINT     NOT NULL CHECK (creditos > 0),
+    semestre        SMALLINT     CHECK (semestre BETWEEN 1 AND 14)
+);
+
+-- Resumen académico del estudiante por periodo (fuente principal del modelo ML)
+CREATE TABLE datos_academicos (
+    id                      SERIAL PRIMARY KEY,
+    estudiante_id           INTEGER      NOT NULL REFERENCES estudiantes(id) ON DELETE CASCADE,
+    periodo_id              INTEGER      NOT NULL REFERENCES periodos_academicos(id),
+    semestre_cursado        SMALLINT     NOT NULL CHECK (semestre_cursado BETWEEN 1 AND 14),
+    creditos_inscritos      SMALLINT     NOT NULL DEFAULT 0 CHECK (creditos_inscritos >= 0),
+    creditos_aprobados      SMALLINT     NOT NULL DEFAULT 0 CHECK (creditos_aprobados >= 0),
+    creditos_reprobados     SMALLINT     NOT NULL DEFAULT 0 CHECK (creditos_reprobados >= 0),
+    promedio_periodo        NUMERIC(3,2) CHECK (promedio_periodo BETWEEN 0 AND 5),
+    promedio_acumulado      NUMERIC(3,2) CHECK (promedio_acumulado BETWEEN 0 AND 5),
+    asistencia_pct          NUMERIC(5,2) CHECK (asistencia_pct BETWEEN 0 AND 100),
+    materias_reprobadas     SMALLINT     NOT NULL DEFAULT 0 CHECK (materias_reprobadas >= 0),
+    materias_canceladas     SMALLINT     NOT NULL DEFAULT 0 CHECK (materias_canceladas >= 0),
+    materias_repetidas      SMALLINT     NOT NULL DEFAULT 0 CHECK (materias_repetidas >= 0),
+    estado_matricula        VARCHAR(15)  NOT NULL DEFAULT 'matriculado'
+                            CHECK (estado_matricula IN ('matriculado','cancelado','aplazado','no_matriculado')),
+    creado_en               TIMESTAMP    NOT NULL DEFAULT NOW(),
+    UNIQUE (estudiante_id, periodo_id)
+);
+
+-- Detalle de notas por asignatura (opcional, para análisis más fino)
+CREATE TABLE calificaciones (
+    id              SERIAL PRIMARY KEY,
+    estudiante_id   INTEGER      NOT NULL REFERENCES estudiantes(id) ON DELETE CASCADE,
+    asignatura_id   INTEGER      NOT NULL REFERENCES asignaturas(id),
+    periodo_id      INTEGER      NOT NULL REFERENCES periodos_academicos(id),
+    nota_final      NUMERIC(3,2) CHECK (nota_final BETWEEN 0 AND 5),
+    asistencia_pct  NUMERIC(5,2) CHECK (asistencia_pct BETWEEN 0 AND 100),
+    aprobada        BOOLEAN,
+    intento         SMALLINT     NOT NULL DEFAULT 1 CHECK (intento >= 1),
+    UNIQUE (estudiante_id, asignatura_id, periodo_id)
+);
+
+-- ---------------------------------------------------------------------
+-- 5. INTELIGENCIA: modelos ML y predicciones
+-- ---------------------------------------------------------------------
+CREATE TABLE modelos_ml (
+    id                  SERIAL PRIMARY KEY,
+    nombre              VARCHAR(100) NOT NULL,
+    algoritmo           VARCHAR(50)  NOT NULL,           -- random_forest, gradient_boosting, xgboost, lightgbm
+    version             VARCHAR(20)  NOT NULL,
+    ruta_archivo        VARCHAR(255) NOT NULL,           -- ruta al .pkl
+    metricas            JSONB,                           -- accuracy, precision, recall, f1, auc_roc
+    hiperparametros     JSONB,
+    variables           JSONB,                           -- lista de variables usadas
+    fecha_entrenamiento TIMESTAMP    NOT NULL DEFAULT NOW(),
+    activo              BOOLEAN      NOT NULL DEFAULT FALSE,
+    registrado_por      INTEGER      REFERENCES usuarios(id),
+    UNIQUE (nombre, version)
+);
+-- Solo un modelo activo a la vez
+CREATE UNIQUE INDEX ux_modelo_activo ON modelos_ml (activo) WHERE activo = TRUE;
+
+CREATE TABLE predicciones (
+    id              SERIAL PRIMARY KEY,
+    estudiante_id   INTEGER      NOT NULL REFERENCES estudiantes(id) ON DELETE CASCADE,
+    periodo_id      INTEGER      REFERENCES periodos_academicos(id),
+    modelo_id       INTEGER      REFERENCES modelos_ml(id),
+    probabilidad    NUMERIC(5,4) NOT NULL CHECK (probabilidad BETWEEN 0 AND 1),
+    nivel_riesgo    VARCHAR(10)  NOT NULL CHECK (nivel_riesgo IN ('bajo','medio','alto')),
+    factores        JSONB,                               -- explicabilidad: [{variable, valor, impacto}]
+    creado_por      INTEGER      REFERENCES usuarios(id),
+    creado_en       TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+-- ---------------------------------------------------------------------
+-- 6. ALERTAS E INTERVENCIONES
+-- ---------------------------------------------------------------------
+CREATE TABLE alertas (
+    id              SERIAL PRIMARY KEY,
+    estudiante_id   INTEGER      NOT NULL REFERENCES estudiantes(id) ON DELETE CASCADE,
+    prediccion_id   INTEGER      REFERENCES predicciones(id) ON DELETE SET NULL,
+    tipo            VARCHAR(20)  NOT NULL CHECK (tipo IN ('prediccion_ml','academica','asistencia','socioeconomica','manual')),
+    nivel           VARCHAR(10)  NOT NULL CHECK (nivel IN ('bajo','medio','alto')),
+    titulo          VARCHAR(150) NOT NULL,
+    descripcion     TEXT,
+    estado          VARCHAR(15)  NOT NULL DEFAULT 'pendiente'
+                    CHECK (estado IN ('pendiente','en_proceso','atendida','cerrada')),
+    asignado_a      INTEGER      REFERENCES usuarios(id),
+    creado_en       TIMESTAMP    NOT NULL DEFAULT NOW(),
+    actualizado_en  TIMESTAMP    NOT NULL DEFAULT NOW(),
+    cerrado_en      TIMESTAMP
+);
+
+CREATE TABLE intervenciones (
+    id              SERIAL PRIMARY KEY,
+    estudiante_id   INTEGER      NOT NULL REFERENCES estudiantes(id) ON DELETE CASCADE,
+    alerta_id       INTEGER      REFERENCES alertas(id) ON DELETE SET NULL,
+    responsable_id  INTEGER      NOT NULL REFERENCES usuarios(id),
+    tipo            VARCHAR(20)  NOT NULL CHECK (tipo IN ('tutoria','psicologica','financiera','academica','familiar','seguimiento','otra')),
+    descripcion     TEXT         NOT NULL,
+    fecha           DATE         NOT NULL DEFAULT CURRENT_DATE,
+    resultado       TEXT,
+    estado          VARCHAR(15)  NOT NULL DEFAULT 'programada'
+                    CHECK (estado IN ('programada','realizada','cancelada')),
+    proxima_fecha   DATE,
+    creado_en       TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+-- ---------------------------------------------------------------------
+-- 7. AUDITORÍA (seguridad / trazabilidad)
+-- ---------------------------------------------------------------------
+CREATE TABLE auditoria (
+    id              BIGSERIAL PRIMARY KEY,
+    usuario_id      INTEGER      REFERENCES usuarios(id) ON DELETE SET NULL,
+    accion          VARCHAR(50)  NOT NULL,              -- login, crear, actualizar, eliminar, predecir
+    entidad         VARCHAR(50),
+    entidad_id      INTEGER,
+    detalle         JSONB,
+    ip              VARCHAR(45),
+    fecha           TIMESTAMP    NOT NULL DEFAULT NOW()
+);
+
+-- ---------------------------------------------------------------------
+-- ÍNDICES
+-- ---------------------------------------------------------------------
+CREATE INDEX ix_estudiantes_programa   ON estudiantes (programa_id);
+CREATE INDEX ix_estudiantes_estado     ON estudiantes (estado);
+CREATE INDEX ix_academicos_estudiante  ON datos_academicos (estudiante_id);
+CREATE INDEX ix_socio_estudiante       ON datos_socioeconomicos (estudiante_id);
+CREATE INDEX ix_predicciones_est_fecha ON predicciones (estudiante_id, creado_en DESC);
+CREATE INDEX ix_alertas_estado         ON alertas (estado);
+CREATE INDEX ix_alertas_estudiante     ON alertas (estudiante_id);
+CREATE INDEX ix_intervenciones_est     ON intervenciones (estudiante_id);
+CREATE INDEX ix_auditoria_fecha        ON auditoria (fecha DESC);
+
+-- ---------------------------------------------------------------------
+-- VISTA: dataset para el modelo ML (una fila por estudiante, último periodo)
+-- La usan el script de entrenamiento (ml/) y el backend al predecir,
+-- así ambos construyen las variables exactamente igual.
+-- ---------------------------------------------------------------------
+CREATE VIEW vw_dataset_desercion AS
+SELECT DISTINCT ON (e.id)
+    e.id                                            AS estudiante_id,
+    e.codigo,
+    e.programa_id,
+    da.periodo_id,
+    -- Variables personales
+    EXTRACT(YEAR FROM AGE(p.fecha_inicio, e.fecha_nacimiento))::INT AS edad,
+    e.genero,
+    e.puntaje_saber11,
+    e.tipo_colegio,
+    -- Variables académicas
+    da.semestre_cursado,
+    da.creditos_inscritos,
+    da.creditos_aprobados,
+    da.creditos_reprobados,
+    CASE WHEN da.creditos_inscritos > 0
+         THEN ROUND(da.creditos_aprobados::NUMERIC / da.creditos_inscritos, 4) END AS tasa_aprobacion,
+    da.promedio_periodo,
+    da.promedio_acumulado,
+    da.asistencia_pct,
+    da.materias_reprobadas,
+    da.materias_canceladas,
+    da.materias_repetidas,
+    -- Variables socioeconómicas (las del mismo periodo o, si no hay, las más recientes)
+    ds.estrato,
+    ds.ingreso_familiar,
+    ds.trabaja,
+    ds.horas_trabajo_semana,
+    ds.personas_a_cargo,
+    ds.tipo_vivienda,
+    ds.zona_residencia,
+    ds.distancia_km,
+    ds.tiene_beca,
+    ds.apoyo_financiero,
+    ds.nivel_educativo_padres,
+    -- Variable objetivo (solo tiene sentido para estudiantes con estado final)
+    e.estado,
+    CASE WHEN e.estado = 'desertor' THEN 1 ELSE 0 END AS desercion
+FROM estudiantes e
+JOIN datos_academicos da     ON da.estudiante_id = e.id
+JOIN periodos_academicos p   ON p.id = da.periodo_id
+LEFT JOIN LATERAL (
+    SELECT s.*
+    FROM datos_socioeconomicos s
+    JOIN periodos_academicos sp ON sp.id = s.periodo_id
+    WHERE s.estudiante_id = e.id
+    ORDER BY (sp.fecha_inicio > p.fecha_inicio), sp.fecha_inicio DESC
+    LIMIT 1
+) ds ON TRUE
+ORDER BY e.id, p.fecha_inicio DESC;
+
+-- ---------------------------------------------------------------------
+-- DATOS BASE MÍNIMOS (catálogo de roles, necesarios para iniciar sesión)
+-- ---------------------------------------------------------------------
+INSERT INTO roles (nombre, descripcion) VALUES
+    ('administrador', 'Gestiona usuarios, catálogos y el modelo de ML'),
+    ('coordinador',   'Coordinador de programa: consulta estudiantes, reportes y gestiona alertas'),
+    ('docente',       'Docente / consejero: consulta estudiantes asignados y registra intervenciones'),
+    ('bienestar',     'Bienestar Universitario: atiende alertas y registra intervenciones');
+
+COMMIT;
+
+
+-- =====================================================================
+--  PARTE 3. PRIMER USUARIO ADMINISTRADOR
+-- =====================================================================
+--  Las contraseñas se guardan cifradas con bcrypt, por eso el primer
+--  administrador se crea con el script del backend (no con SQL):
+--
+--      cd backend
+--      .venv\Scripts\activate
+--      python crear_admin.py --email admin@udla.edu.co --nombres Nombre --apellidos Apellido
+--
+--  (Con Docker: docker compose exec backend python crear_admin.py ...)
+--
+--  DATOS DE PRUEBA (opcional, solo para desarrollo):
+--      roles_y_usuarios.sql  -> un usuario por rol (contraseña pública, NO usar en producción)
+--      datos_prueba.sql      -> 100 estudiantes ficticios
+-- =====================================================================

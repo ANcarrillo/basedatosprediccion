@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# Respaldos y exportaciones (pueden contener datos reales de estudiantes)
+*.xlsx
+respaldo*.sql
+*.sql.gz

@@ -2,6 +2,28 @@
 
 Fase 3.1 (modelo entidad-relación) y 4.2 (implementación). El script `schema.sql` crea **solo la estructura**; los datos los cargan ustedes. Lo único que inserta es el catálogo de **roles** (necesario para crear usuarios).
 
+## Repositorios del proyecto
+
+El sistema está dividido en cuatro repositorios:
+
+| Parte | Repositorio | Carpeta sugerida |
+|---|---|---|
+| Backend (API FastAPI) | https://github.com/ANcarrillo/backprediccion | `backend` |
+| Frontend (PWA React) | https://github.com/ANcarrillo/frontprediccion | `frontend` |
+| Modelo de ML | https://github.com/ANcarrillo/modelopreccion | `ml` |
+| Base de datos (PostgreSQL) | https://github.com/ANcarrillo/basedatosprediccion | `database` |
+
+Clónelos **uno al lado del otro con esos nombres de carpeta**; así funcionan las rutas entre partes (por ejemplo, el backend lee los modelos desde `../ml/models`):
+
+```powershell
+git clone https://github.com/ANcarrillo/backprediccion.git backend
+git clone https://github.com/ANcarrillo/frontprediccion.git frontend
+git clone https://github.com/ANcarrillo/modelopreccion.git ml
+git clone https://github.com/ANcarrillo/basedatosprediccion.git database
+```
+
+El despliegue completo con Docker (`docker-compose.yml`, Caddy, guías de Azure) está en el repositorio integrador https://github.com/ANcarrillo/GestionConocimineto.
+
 ## Crear la base de datos
 
 ```bash
